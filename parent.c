@@ -1,143 +1,356 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
 
-static int DEBUG;
+#define BUFSIZE 8192
+#define CHILDREN 3
 
-static void debug(const char *msg);
+struct descriptor_info {
+	int fd;
+	pid_t pid;
+	const char *prefix;
+	char *buffer;
+	size_t buffer_size;
+};
+
+static struct descriptor_info descriptors[CHILDREN << 1];
+static int max_descriptor = -1;
+static int terminating = 0;
+
+static fd_set spawn_child_processes(const char *image);
+static pid_t spawn_child_process(
+	const char *image, int *child_stdout, int *child_stderr);
+static void multiplex_io(fd_set *set);
+static void process_output(struct descriptor_info *info, fd_set *set);
+static char *xstrdup(const char *str);
+static void *xrealloc(void *buf, size_t size);
+static void reap_children(void);
+static void sigchld_handler(int sig);
+static void sigint_handler(int sig);
 
 int
 main(int argc, char *argv[])
 {
-	char *debug_enabled = getenv("DEBUG_IO_MULTIPLEXING");
-	DEBUG = debug_enabled
-		&& strcmp(debug_enabled, "")
-		&& strcmp(debug_enabled, "0");
-
 	puts("Running forever, hit CTRL-C to stop.");
-	debug("test");
+
+	memset(descriptors, 0, sizeof descriptors);
+
+	struct sigaction sa;
+	sa.sa_handler = &sigchld_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+	if (sigaction(SIGCHLD, &sa, 0) == -1) {
+		fprintf(stderr, "cannot install sigchld handler: %s\n",
+			strerror(errno));
+		exit(1);
+	}
+
+	sa.sa_handler = &sigint_handler;
+	if (sigaction(SIGINT, &sa, 0) == -1) {
+		fprintf(stderr, "cannot install sigint handler: %s\n",
+			strerror(errno));
+		exit(1);
+	}
+	if (sigaction(SIGHUP, &sa, 0) == -1) {
+		fprintf(stderr, "cannot install sighup handler: %s\n",
+			strerror(errno));
+		exit(1);
+	}
+	if (sigaction(SIGTERM, &sa, 0) == -1) {
+		fprintf(stderr, "cannot install sigterm handler: %s\n",
+			strerror(errno));
+		exit(1);
+	}
+	if (sigaction(SIGQUIT, &sa, 0) == -1) {
+		fprintf(stderr, "cannot install sigquit handler: %s\n",
+			strerror(errno));
+		exit(1);
+	}
+	
+	sa.sa_handler = &sigint_handler;
+
+	atexit(reap_children);
+
+	fd_set set = spawn_child_processes("./child.exe");
+
+	multiplex_io(&set);
 
 	return 0;
 }
 
-static void
-debug(const char *msg)
+static fd_set
+spawn_child_processes(const char *image)
 {
-	if (DEBUG) {
-		fprintf(stderr, "[parent][debug]: %s\n", msg);
-	}
-}
 
-/*
-my $script = __FILE__;
-$script =~ s/parent\.pl$/child.pl/;
+	fd_set set;
+	FD_ZERO(&set);
 
-# This is the equivalent of FD_ZERO(&set) in C.
-my $set = '';
+	for (int i = 0; i < CHILDREN; ++i) {
+		struct descriptor_info *stdout_info = &descriptors[i << 1];
+		stdout_info->prefix = "info";
+		stdout_info->buffer = xstrdup("");
+		stdout_info->buffer_size = 1;
+		struct descriptor_info *stderr_info = &descriptors[(i << 1) + 1];
+		stderr_info->prefix = "error";
+		stderr_info->buffer = xstrdup("");
+		stderr_info->buffer_size = 1;
 
-foreach (1 .. 3) {
-	# The variable $^X contains the path to the Perl interpreter.
-	my ($pid, $child_stdout, $child_stderr) = spawn_child_process $^X, $script;
+		stdout_info->pid = stderr_info->pid = spawn_child_process(
+			"./child.exe", &stdout_info->fd, &stderr_info->fd
+		);
 
-	my $child_stdout_fd = fileno $child_stdout;
-	my $child_stderr_fd = fileno $child_stderr;
-
-	debug "PID $pid has descriptors $child_stdout_fd and $child_stderr_fd\n";
-
-	# Reading from the handle associated with the file descriptor must be
-	# done with sysread() and not read() or the diamond operator <> so that
-	# Perl's I/O buffering is bypassed.
-	#
-	# You must also make sure that you read the data in non-blocking mode
-	# or alternatively just read one byte at a time.  The latter approach
-	# is straightforward. So we go for the first one and set both descriptors
-	# to non blocking I/O mode at system level.
-	my $stdout_flags = fcntl $child_stdout, F_GETFL, 0
-		or die "cannot get descriptor status flags of $child_stdout_fd: $!";
-	fcntl $child_stdout, F_GETFL, $stdout_flags | O_NONBLOCK
-		or die "cannot set descriptor $child_stdout_fd to non-blocking: $!";
-	my $stderr_flags = fcntl $child_stderr, F_GETFL, 0
-		or die "cannot get descriptor status flags of $child_stderr_fd: $!";
-	fcntl $child_stderr, F_GETFL, $stderr_flags | O_NONBLOCK
-		or die "cannot set descriptor $child_stderr_fd to non-blocking: $!";
-
-	$descriptors{$child_stdout_fd} = {
-		pid => $pid,
-		prefix => 'info',
-		buffer => '',
-		handle => $child_stdout,
-	};
-	$descriptors{$child_stderr_fd} = {
-		pid => $pid,
-		prefix => 'error',
-		buffer => '',
-		handle => $child_stderr,
-	};
-
-	# Store the file descriptors in the set for select().
-	vec($set, $child_stdout_fd, 1) = 1; # FD_SET(child_stdout, set) in C.
-	vec($set, $child_stderr_fd, 1) = 1; # FD_SET(child_stdout, set) in C.
-}
-
-# Now poll all descriptors.
-while (1) {
-	# Now wait until any of these handles are ready to read s.  In C this would
-	# be: select(&rout, NULL, NULL, NULL);
-	select my $rout = $set, undef, undef, undef or next;
-
-	foreach my $descriptor (keys %descriptors) {
-		# Descriptor is a numerical file descriptor. Check whether the
-		# corresponding bit is set in the $rout bitmask.
-		next if !vec $rout, $descriptor, 1;
-		debug "descriptor $descriptor is ready for reading";
-
-		my $rec = $descriptors{$descriptor};
-		my $offset = length $rec->{buffer};
-		my $nread = sysread $rec->{handle}, $rec->{buffer}, 8192, $offset;
-
-		if (!defined $nread) {
-			debug "error reading from descriptor $descriptor: $!\n";
-		} elsif ($nread == 0) {
-			debug "end-of-file reading from descriptor $descriptor\n";
-
-			# No point reading from that descriptor.
-			vec($set, $descriptor, 1) = 0;
-			delete $descriptors{$descriptor};
+		/* Because of the ideosyncrasies of select() we have to remember the
+		 * highest file descriptor.
+		 */
+		if (stdout_info->fd > max_descriptor) {
+			max_descriptor = stdout_info->fd;
+		}
+		if (stderr_info->fd > max_descriptor) {
+			max_descriptor = stderr_info->fd;
 		}
 
-		while ($rec->{buffer} =~ s/(.*?)\n//) {
-			print "[child $rec->{pid}][$rec->{prefix}]: $1\n";
+		/* You must make sure that you read the data in non-blocking mode
+		 * or alternatively just read one byte at a time.  The latter approach
+		 * is straightforward. So we go for the first one and set both
+		 * descriptors to non blocking I/O mode at system level.
+		 */
+		int stdout_flags = fcntl(stdout_info->fd, F_GETFL, 0);
+		if (stdout_flags < 0) {
+			fprintf(
+				stderr,
+				"cannot get descriptor status flags of %u: %s\n",
+				stdout_info->fd, strerror(errno)
+			);
+			exit(1);
 		}
+		if (fcntl(stdout_info->fd, F_SETFL, stdout_flags | O_NONBLOCK) < 0) {
+			fprintf(
+				stderr,
+				"cannot set descriptor %u to non-blocking: %s\n",
+				stdout_info->fd, strerror(errno)
+			);
+			exit(1);
+		}
+	
+		int stderr_flags = fcntl(stderr_info->fd, F_GETFL, 0);
+		if (stderr_flags < 0) {
+			fprintf(
+				stderr,
+				"cannot get descriptor status flags of %u: %s\n",
+				stderr_info->fd, strerror(errno)
+			);
+			exit(1);
+		}
+		if (fcntl(stderr_info->fd, F_SETFL, stderr_flags | O_NONBLOCK) < 0) {
+			fprintf(
+				stderr,
+				"cannot set descriptor %u to non-blocking: %s\n",
+				stderr_info->fd, strerror(errno)
+			);
+			exit(1);
+		}
+
+		/* Store the file descriptors in the set for select().  */
+		FD_SET(stdout_info->fd, &set);
+		FD_SET(stderr_info->fd, &set);
 	}
+
+	return set;
 }
 
-sub spawn_child_process {
-	my ($perl, $script) = @_;
+static pid_t
+spawn_child_process(const char *image, int *stdout_read, int *stderr_read)
+{
+	int stdout_fd[2], stderr_fd[2];
 
-	pipe my $stdout_read, my $stdout_write or die "cannot create pipe: $!\n";
-	pipe my $stderr_read, my $stderr_write or die "cannot create pipe: $!\n";
+	if (pipe(stdout_fd) != 0) {
+		fprintf(stderr, "error creating pipe: %s\n", strerror(errno));
+		exit(1);
+	}
 
-	my $pid = fork;
-	if ($pid) {
-		# Parent process.
-		return $pid, $stdout_read, $stderr_read;
+	if (pipe(stderr_fd) != 0) {
+		fprintf(stderr, "error creating pipe: %s\n", strerror(errno));
+		exit(1);
+	}
+
+	pid_t pid = fork();
+	if (pid > 0) {
+		*stdout_read = stdout_fd[0];
+		*stderr_read = stderr_fd[0];
+
+		return pid;
+	} else if (pid < 0) {
+		fprintf(stderr, "cannot fork: %s\n", strerror(errno));
 	} else {
-		die "cannot fork: $!\n" if !defined $pid;
+		if (dup2(stdout_fd[1], STDOUT_FILENO) < 0) {
+			fprintf(stderr, "cannot dup stdout: %s\n", strerror(errno));
+			exit(1);
+		}
 
-		# Child process.  Dup standard output and standard error to the pipe.
-		open STDOUT, '>&', $stdout_write or die "cannot dup stdout: $!";
-		open STDERR, '>&', $stderr_write or die "cannot dup stderr: $!";
+		if (dup2(stdout_fd[1], STDERR_FILENO) < 0) {
+			fprintf(stderr, "cannot dup stderr: %s\n", strerror(errno));
+			exit(1);
+		}
 
-		exec $perl, $script or die "cannot exec $perl $script: $!\n";
+		if (execl(image, NULL) < 0) {
+			fprintf(stderr, "cannot execl %s: %s\n", image, strerror(errno));
+			exit(1);
+		}
+	}
+
+	return pid;
+}
+
+static void
+multiplex_io(fd_set *set)
+{
+	unsigned num_descriptors = sizeof descriptors / sizeof descriptors[0];
+
+	while (1) {
+		fd_set rout;
+
+		FD_COPY(set, &rout);
+		if (select(max_descriptor + 1, &rout, NULL, NULL, NULL) < 0) {
+			continue;
+		}
+
+		for (unsigned int i = 0; i < num_descriptors; ++i) {
+			int fd = descriptors[i].fd;
+			if (!FD_ISSET(fd, &rout)) {
+				continue;
+			}
+
+			process_output(descriptors + i, set);
+		}
+
+		sleep(1);
 	}
 }
 
-sub debug {
-	if (DEBUG) {
-		my ($msg) = @_;
+static void
+process_output(struct descriptor_info *info, fd_set *set)
+{
+	char buffer[BUFSIZE];
+	ssize_t bytes_read = read(info->fd, buffer, BUFSIZE);
+	size_t offset = strlen(info->buffer);
+	size_t needed = offset + bytes_read + 1;
+	char *linefeed;
 
-		chomp $msg;
-		warn "[parent][debug]: $msg\n";
+	if (bytes_read < 0) {
+		fprintf(stderr, "error reading from child: %s\n", strerror(errno));
+		exit(1);
+	} else if (bytes_read == 0) {
+		/* End-of-file.  */
+		memset(info, 0, sizeof *info);
+		FD_CLR(info->fd, set);
+		return;
+	}
+
+	if (needed > info->buffer_size) {
+		info->buffer = xrealloc(info->buffer, needed);
+		info->buffer_size = needed;
+	}
+
+	strncat(info->buffer + offset, buffer, bytes_read);
+	info->buffer[offset + bytes_read] = '\0';
+
+	while ((linefeed = index(info->buffer, '\n'))) {
+		*linefeed = '\0';
+		printf(
+			"[child %u][%s]: %s\n", info->pid, info->prefix, info->buffer
+		);
+		memmove(
+			info->buffer, linefeed + 1, info->buffer_size - strlen(info->buffer)
+		);
 	}
 }
-*/
+
+static char *
+xstrdup(const char *str)
+{
+	char *buffer = strdup(str);
+	if (!buffer) {
+		fprintf(stderr, "virtual memory exhausted!\n");
+		exit(1);
+	}
+
+	return buffer;
+}
+
+static void *
+xrealloc(void *ptr, size_t bytes)
+{
+	void *buffer = realloc(ptr, bytes);
+	if (!buffer) {
+		fprintf(stderr, "virtual memory exhausted!\n");
+		exit(1);
+	}
+
+	return buffer;
+}
+
+static void
+reap_children()
+{
+	if (terminating) {
+		return;
+	}
+
+	fprintf(stderr, "waiting for children to terminate ...\n");
+
+	for (int i = 0; i < CHILDREN; ++i) {
+		struct descriptor_info *info = &descriptors[i << 1];
+		if (!info->pid) {
+			continue;
+		}
+		kill(info->pid, SIGKILL);
+	}
+
+	while (1) {
+		int alive = 0;
+		for (int i = 0; i < CHILDREN; ++i) {
+			if (descriptors[i << 1].pid) {
+				alive = 1;
+				break;
+			}
+		}
+		if (!alive) {
+			fprintf(stderr, "all child processes terminated.\n");
+			return;
+		}
+		sleep(1);
+	}
+}
+
+static void
+sigchld_handler(int sig)
+{
+	int saved_errno = errno;
+	pid_t pid;
+	while ((pid = waitpid((pid_t) (-1), 0, WNOHANG)) > 0) {
+		for (int i = 0; i < CHILDREN; ++i) {
+			if (descriptors[i << 1].pid == pid) {
+				memset(&descriptors[i << 1], 0,
+					sizeof descriptors[i << 1]
+				);
+				memset(&descriptors[(i << 1) + 1], 0,
+					sizeof descriptors[(i << 1) + 1]
+				);
+			}
+		}
+	}
+
+	errno = saved_errno;
+}
+
+static void sigint_handler(int sig)
+{
+	reap_children();
+	terminating = 1;
+	exit(1);
+}

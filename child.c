@@ -12,7 +12,8 @@ main(int argc, char *argv[])
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	setvbuf(stderr, NULL, _IOLBF, 0);
 
-	srand(time(NULL));
+	/* Try to force a different random seed for every child.  */
+	srand(time(NULL) + pid);
 
 	useconds_t us;
 
@@ -20,6 +21,12 @@ main(int argc, char *argv[])
 		us = rand() % 3000000;
 		fprintf(stdout,
 			"child pid %u writing to stdout before sleeping %u μs.\n",
+			pid, us);
+		usleep(us);
+
+		us = rand() % 3000000;
+		fprintf(stderr,
+			"child pid %u writing to stderr before sleeping %u μs.\n",
 			pid, us);
 		usleep(us);
 	}

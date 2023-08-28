@@ -25,7 +25,7 @@ Running forever, hit CTRL-C to stop.
 [child 69554][info]: child pid 69554 writing to stdout before sleeping 2261943 μs.
 [child 69555][info]: child pid 69555 writing to stdout before sleeping 858209 μs.
 [child 69556][info]: child pid 69556 writing to stdout before sleeping 2370161 μs.
-[child 69555][info]: child pid 69555 writing to stderr before sleeping 2860666 μs.
+[child 69555][error]: child pid 69555 writing to stderr before sleeping 2860666 μs.
 ...
 ```
 
@@ -56,7 +56,11 @@ ignore it, if you do not know what it is used for.
 
 ### C
 
-The same example is provided in C.  If you have `make`, you can just do:
+The same example is provided in C.  Every C compiler out there should be good
+enough to compile the example.  You also need a POSIX complient standard C
+library.
+
+If you have `make`, you can just do:
 
 ```sh
 $ make
