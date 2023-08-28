@@ -48,6 +48,9 @@ child pid 71879 writing to stderr before sleeping 2937516 μs.
 The child processes write these lines to standard output and standard error
 respectively, before sleeping a random period of time between 0 and 3 seconds.
 
+Hint: The file `dist.ini` is used for `dzil` (`Dist::Zilla`).  You can safely
+ignore it, if you do not know what it is used for.
+
 ### C
 
 The same example is provided in C.  If you have `make`, you can just do:
