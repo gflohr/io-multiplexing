@@ -48,6 +48,9 @@ child pid 71879 writing to stderr before sleeping 2937516 μs.
 The child processes write these lines to standard output and standard error
 respectively, before sleeping a random period of time between 0 and 3 seconds.
 
+You can set the environment variable `DEBUG_IO_MULTIPLEXING` to a truthy
+value if you want to enable additional debugging information.
+
 Hint: The file `dist.ini` is used for `dzil` (`Dist::Zilla`).  You can safely
 ignore it, if you do not know what it is used for.
 
@@ -59,18 +62,21 @@ The same example is provided in C.  If you have `make`, you can just do:
 $ make
 ```
 
-This creates the two executables `parent` and `child` (or `parent.exe` and
-`child.exe` on MS-DOS).
+This creates the two executables `parent.exe` and `child.exe`.  The extension
+`.exe` is used on every system for this example, not just on MS-DOS!
 
 You can run these executables just like the Perl scripts described above.  The
 output is identical (except for the process IDs).
+
+For simplicity, the C version searches `child.exe` always in the current
+working directory.
 
 If your system lacks `make` but has a C compiler, you can also compile the
 two executables manually:
 
 ```sh
-$ cc parent.c
-$ cc child.c
+$ cc -o parent.exe parent.c
+$ cc -o child.exe child.c
 ```
 
 Replace `cc` with the path to your C compiler if `cc` cannot be found.

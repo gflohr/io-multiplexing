@@ -1,8 +1,13 @@
 CC = cc
+CFLAGS = -Wall
+COMPILE = $(CC) $(CFLAGS)
 
 DEFAULT = all
 
-all: child
+all: parent.exe child.exe
 
-child: child.c
-	$(CC) -o $@ $<
+parent.exe: parent.c
+	$(COMPILE) -o $@ $<
+
+child.exe: child.c
+	$(COMPILE) -o $@ $<

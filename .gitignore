@@ -1,7 +1,7 @@
 /io-multiplexing-*
 /.vscode
-/child
-/parent
+*.exe
+*.o
 
 /META.yml
 /META.json
