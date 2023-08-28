@@ -14,9 +14,9 @@ my $us;
 
 while (1) {
 	$us = int rand 3_000_000;
-	say STDOUT "child pid $$ writing to STDOUT before sleeping $us μs.";
+	say STDOUT "child pid $$ writing to stdout before sleeping $us μs.";
 	usleep $us;
 	$us = int rand 3_000_000;
-	say STDOUT "child pid $$ writing to STDERR before sleeping $us μs.";
+	say STDOUT "child pid $$ writing to stderr before sleeping $us μs.";
 	usleep $us;
 }
