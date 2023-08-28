@@ -8,6 +8,7 @@ main(int argc, char *argv[])
 {
 	pid_t pid = getpid();
 
+
 	/* Make standard output and standard error line buffered.  */
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	setvbuf(stderr, NULL, _IOLBF, 0);
@@ -18,15 +19,23 @@ main(int argc, char *argv[])
 	useconds_t us;
 
 	while (1) {
-		us = rand() % 3000000;
+		us = (int) (((float) rand() / RAND_MAX) * 3000000);
 		fprintf(stdout,
-			"child pid %u writing to stdout before sleeping %u μs.\n",
+#if IS_UNIX
+			"child pid %llu writing to stdout before sleeping %u us.\n",
+#else
+			"child pid %I64d writing to stdout before sleeping %u us.\n",
+#endif
 			pid, us);
 		usleep(us);
 
-		us = rand() % 3000000;
+		us = (int) (((float) rand() / RAND_MAX) * 3000000);
 		fprintf(stderr,
-			"child pid %u writing to stderr before sleeping %u μs.\n",
+#if IS_UNIX
+			"child pid %llu writing to stderr before sleeping %u us.\n",
+#else
+			"child pid %I64d writing to stderr before sleeping %u us.\n",
+#endif
 			pid, us);
 		usleep(us);
 	}
