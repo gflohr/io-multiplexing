@@ -60,7 +60,7 @@ The same example is provided in C.  Every C compiler out there should be good
 enough to compile the example.  You also need a POSIX complient standard C
 library.
 
-If you have `make`, you can just do:
+If you have `make` (on MS-DOS aka Windows also try `gmake`), you can just do:
 
 ```sh
 $ make
@@ -84,3 +84,7 @@ $ cc -o child.exe child.c
 ```
 
 Replace `cc` with the path to your C compiler if `cc` cannot be found.
+
+## See Also
+
+* https://stackoverflow.com/questions/10569805/what-is-the-preferred-cross-platform-ipc-perl-module

@@ -1,3 +1,21 @@
+#if !defined(_WIN32) && (defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__)))
+/* POSIX system.  */
+# define IS_POSIX 1
+# include <sys/select.h>
+# include <sys/wait.h>
+#else
+/* MS-DOS */
+# define IS_MS_DOS 1
+# define FD_SETSIZE 1024
+# include <winsock2.h>
+# include <ws2tcpip.h>
+# include <windows.h>
+# include <io.h>
+# define socketpair(domain, type, protocol, sockets) \
+	win32_socketpair(sockets)
+static int win32_socketpair(SOCKET socks[2]);
+static int convert_wsa_error_to_errno(int wsaerr);
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -5,14 +23,19 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <sys/wait.h>
+
+#if IS_MS_DOS
+# define PID_TYPE DWORD
+#else
+# define PID_TYPE pid_t
+#endif
 
 #define BUFSIZE 8192
 #define CHILDREN 3
 
 struct descriptor_info {
 	int fd;
-	pid_t pid;
+	PID_TYPE pid;
 	const char *prefix;
 	char *buffer;
 	size_t buffer_size;
@@ -20,26 +43,267 @@ struct descriptor_info {
 
 static struct descriptor_info descriptors[CHILDREN << 1];
 static int max_descriptor = -1;
+
+#if IS_POSIX
 static int terminating = 0;
+#endif
 
 static fd_set spawn_child_processes(const char *image);
-static pid_t spawn_child_process(
-	const char *image, int *child_stdout, int *child_stderr);
+static PID_TYPE spawn_child_process(
+	char *image, int *child_stdout, int *child_stderr);
 static void multiplex_io(fd_set *set);
 static void process_output(struct descriptor_info *info, fd_set *set);
 static char *xstrdup(const char *str);
 static void *xrealloc(void *buf, size_t size);
+#if IS_POSIX
 static void reap_children(void);
 static void sigchld_handler(int sig);
 static void sigint_handler(int sig);
+#endif
+
+#if IS_MS_DOS
+/* Taken from Perl's win32/win32sck.c but returns EINVAL by default.  */
+static int
+convert_wsa_error_to_errno(int wsaerr)
+{
+    switch (wsaerr) {
+    case WSAEINTR:
+        return EINTR;
+    case WSAEBADF:
+        return EBADF;
+    case WSAEACCES:
+        return EACCES;
+    case WSAEFAULT:
+        return EFAULT;
+    case WSAEINVAL:
+        return EINVAL;
+    case WSAEMFILE:
+        return EMFILE;
+    case WSAEWOULDBLOCK:
+        return EWOULDBLOCK;
+    case WSAEINPROGRESS:
+        return EINPROGRESS;
+    case WSAEALREADY:
+        return EALREADY;
+    case WSAENOTSOCK:
+        return ENOTSOCK;
+    case WSAEDESTADDRREQ:
+        return EDESTADDRREQ;
+    case WSAEMSGSIZE:
+        return EMSGSIZE;
+    case WSAEPROTOTYPE:
+        return EPROTOTYPE;
+    case WSAENOPROTOOPT:
+        return ENOPROTOOPT;
+    case WSAEPROTONOSUPPORT:
+        return EPROTONOSUPPORT;
+    case WSAEOPNOTSUPP:
+        return EOPNOTSUPP;
+    case WSAEAFNOSUPPORT:
+        return EAFNOSUPPORT;
+    case WSAEADDRINUSE:
+        return EADDRINUSE;
+    case WSAEADDRNOTAVAIL:
+        return EADDRNOTAVAIL;
+    case WSAENETDOWN:
+        return ENETDOWN;
+    case WSAENETUNREACH:
+        return ENETUNREACH;
+    case WSAENETRESET:
+        return ENETRESET;
+    case WSAECONNABORTED:
+        return ECONNABORTED;
+    case WSAECONNRESET:
+        return ECONNRESET;
+    case WSAENOBUFS:
+        return ENOBUFS;
+    case WSAEISCONN:
+        return EISCONN;
+    case WSAENOTCONN:
+        return ENOTCONN;
+    case WSAESHUTDOWN:
+		return ECONNRESET;
+    case WSAETIMEDOUT:
+        return ETIMEDOUT;
+    case WSAECONNREFUSED:
+        return ECONNREFUSED;
+    case WSAELOOP:
+        return ELOOP;
+    case WSAENAMETOOLONG:
+        return ENAMETOOLONG;
+    case WSAEHOSTDOWN:
+        return ENETDOWN;        /* EHOSTDOWN is not defined */
+    case WSAEHOSTUNREACH:
+        return EHOSTUNREACH;
+    case WSAENOTEMPTY:
+        return ENOTEMPTY;
+    case WSAEPROCLIM:
+        return EAGAIN;
+    case WSAEUSERS:
+        return EAGAIN;
+    case WSAEDQUOT:
+        return EAGAIN;
+#ifdef WSAECANCELLED
+    case WSAECANCELLED:         /* New in WinSock2 */
+        return ECANCELED;
+#endif
+    }
+
+    return EINVAL;
+}
+
+/* This is inspired by the socketpair() emulation of Perl.  */
+static int
+win32_socketpair(SOCKET sockets[2])
+{
+    SOCKET listener = SOCKET_ERROR;
+	struct sockaddr_in listener_addr;
+	SOCKET connector = SOCKET_ERROR;
+	struct sockaddr_in connector_addr;
+	SOCKET acceptor = SOCKET_ERROR;
+    int saved_errno;
+    socklen_t addr_size;
+
+    if (!sockets) {
+		errno = EINVAL;
+		return SOCKET_ERROR;
+    }
+
+    listener = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+    if (listener < 0) {
+        return SOCKET_ERROR;
+	}
+
+    memset(&listener_addr, 0, sizeof listener_addr);
+	listener_addr.sin_family = AF_INET;
+    listener_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listener_addr.sin_port = 0;  /* OS picks a random free port.  */
+
+	errno = 0;
+	if (bind(listener, (struct sockaddr *) &listener_addr,
+		sizeof listener_addr) == -1) {
+		goto fail_win32_socketpair;
+	}
+
+	if (listen(listener, 1) < 0) {
+		goto fail_win32_socketpair;
+	}
+
+	/* This must be WSASocket() and not socket().  The subtle difference is
+	 * that only sockets created by WSASocket() can be used as standard
+	 * file descriptors.
+	 */
+	connector = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+	if (connector == -1) {
+		goto fail_win32_socketpair;
+	}
+
+	/* Get the port number.  */
+	addr_size = sizeof connector_addr;
+	if (getsockname(listener, (struct sockaddr *) &connector_addr,
+	                &addr_size) < 0) {
+		goto fail_win32_socketpair;
+	}
+	if (addr_size != sizeof connector_addr) {
+		goto abort_win32_socketpair;
+	}
+
+	if (connect(connector, (struct sockaddr *) &connector_addr,
+	            addr_size) < 0) {
+		goto fail_win32_socketpair;
+	}
+
+	acceptor = accept(listener, (struct sockaddr *) &listener_addr, &addr_size);
+	if (acceptor < 0) {
+		goto fail_win32_socketpair;
+	}
+	if (addr_size != sizeof listener_addr) {
+		goto abort_win32_socketpair;
+	}
+
+    closesocket(listener);
+
+	/* The port and host on the socket must be identical.  */
+	if (getsockname(connector, (struct sockaddr *) &connector_addr,
+	                &addr_size) < 0) {
+		goto fail_win32_socketpair;
+	}
+	
+	if (addr_size != sizeof connector_addr
+		|| listener_addr.sin_family != connector_addr.sin_family
+		|| listener_addr.sin_addr.s_addr != connector_addr.sin_addr.s_addr
+		|| listener_addr.sin_port != connector_addr.sin_port) {
+		goto abort_win32_socketpair;
+	}
+
+	sockets[0] = connector;
+	sockets[1] = acceptor;
+	return 0;
+
+abort_win32_socketpair:
+#ifdef ECONNABORTED
+  errno = ECONNABORTED; /* This would be the standard thing to do. */
+#elif defined(ECONNREFUSED)
+  errno = ECONNREFUSED; /* some OSes might not have ECONNABORTED. */
+#else
+  errno = ETIMEDOUT;    /* Desperation time. */
+#endif
+
+fail_win32_socketpair:
+	if (!errno) {
+		errno = convert_wsa_error_to_errno(WSAGetLastError());
+	}
+
+	saved_errno = errno;
+	if (listener >= 0) {
+    	closesocket(listener);
+	}
+	if (connector >= 0) {
+    	closesocket(connector);
+	}
+	if (acceptor >= 0) {
+    	closesocket(acceptor);
+	}
+	errno = saved_errno;
+
+    return SOCKET_ERROR;
+}
+#endif
 
 int
 main(int argc, char *argv[])
 {
 	puts("Running forever, hit CTRL-C to stop.");
 
+#if IS_MS_DOS
+	/* Networking has to be initialized on MS-DOS.  Alternatively, add the
+	 * calls to WSAStartup()/WSACleanup() to win32_socketpair() as they
+	 * can apparently be nested.
+	 */
+    WORD versionRequested;
+    WSADATA wsaData;
+    int err;
+
+    versionRequested = MAKEWORD(2, 2);
+
+    err = WSAStartup(versionRequested, &wsaData);
+    if (err != 0) {
+        fprintf(stderr, "WSAStartup failed with error code: %d\n", err);
+        return 1;
+    }
+
+	/* Request version 2.2.  */
+    if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) {
+        fprintf(stderr, "could not find a usable version of Winsock.dll\n");
+        WSACleanup();
+        return 1;
+    }
+        
+#endif
+
 	memset(descriptors, 0, sizeof descriptors);
 
+#if IS_POSIX
 	struct sigaction sa;
 	sa.sa_handler = &sigchld_handler;
 	sigemptyset(&sa.sa_mask);
@@ -75,6 +339,7 @@ main(int argc, char *argv[])
 	sa.sa_handler = &sigint_handler;
 
 	atexit(reap_children);
+#endif
 
 	fd_set set = spawn_child_processes("./child.exe");
 
@@ -119,6 +384,11 @@ spawn_child_processes(const char *image)
 		 * is straightforward. So we go for the first one and set both
 		 * descriptors to non blocking I/O mode at system level.
 		 */
+#if IS_MS_DOS
+		u_long nb_mode = 1;
+		ioctlsocket(stdout_info->fd, FIONBIO, &nb_mode);
+		ioctlsocket(stderr_info->fd, FIONBIO, &nb_mode);
+#else
 		int stdout_flags = fcntl(stdout_info->fd, F_GETFL, 0);
 		if (stdout_flags < 0) {
 			fprintf(
@@ -154,6 +424,7 @@ spawn_child_processes(const char *image)
 			);
 			exit(1);
 		}
+#endif
 
 		/* Store the file descriptors in the set for select().  */
 		FD_SET(stdout_info->fd, &set);
@@ -163,9 +434,99 @@ spawn_child_processes(const char *image)
 	return set;
 }
 
-static pid_t
-spawn_child_process(const char *image, int *stdout_read, int *stderr_read)
+static PID_TYPE
+spawn_child_process(char *cmd, int *stdout_read, int *stderr_read)
 {
+#if IS_MS_DOS
+    STARTUPINFO si;
+    PROCESS_INFORMATION pi;
+	SOCKET stdout_sockets[2] = { SOCKET_ERROR, SOCKET_ERROR };
+	SOCKET stderr_sockets[2] = { SOCKET_ERROR, SOCKET_ERROR };
+	SOCKET child_stdout;
+	SOCKET child_stderr;
+	BOOL created;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, stdout_sockets) < 0) {
+        fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
+        goto create_process_failed;
+	}
+	child_stdout = stdout_sockets[1];
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, stderr_sockets) < 0) {
+       	fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
+        goto create_process_failed;
+	}
+	child_stderr = stderr_sockets[1];
+
+    memset(&si, 0, sizeof(si));
+	
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+
+	si.hStdOutput = (HANDLE) child_stdout;
+	si.hStdError = (HANDLE) child_stderr;
+
+	SECURITY_ATTRIBUTES secattr; 
+	secattr.nLength = sizeof(SECURITY_ATTRIBUTES); 
+	secattr.bInheritHandle = TRUE;
+	secattr.lpSecurityDescriptor = NULL; 
+
+	created = CreateProcess(NULL,
+        cmd,            // Command.
+        &secattr,           // Process handle not inheritable
+        &secattr,           // Thread handle not inheritable
+        TRUE,           // Set handle inheritance to FALSE
+        0,              // No creation flags
+        NULL,           // Use parent's environment block
+        NULL,           // Use parent's starting directory 
+        &si,            // Pointer to STARTUPINFO structure
+        &pi             // Pointer to PROCESS_INFORMATION structure
+    );
+
+	close(child_stdout);
+	close(child_stderr);
+
+	if (!created) {
+        printf("CreateProcess failed: %s.\n", strerror(errno));
+        goto create_process_failed;
+    }
+
+	*stdout_read = stdout_sockets[0];
+	*stderr_read = stderr_sockets[0];
+
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+
+
+    return pi.dwProcessId;
+
+create_process_failed:
+	if (stdout_sockets[0] >= 0) {
+		closesocket(stdout_sockets[0]);
+	}
+
+	if (stdout_sockets[1] >= 0) {
+		closesocket(stdout_sockets[1]);
+	}
+
+	if (stderr_sockets[0] >= 0) {
+		closesocket(stderr_sockets[0]);
+	}
+
+	if (stderr_sockets[1] >= 0) {
+		closesocket(stderr_sockets[1]);
+	}
+
+	if (pi.hProcess) {
+		CloseHandle(pi.hProcess);
+	}
+
+	if (pi.hThread) {
+		CloseHandle(pi.hThread);
+	}
+
+	return -1;
+#else
 	int stdout_fd[2], stderr_fd[2];
 
 	if (pipe(stdout_fd) != 0) {
@@ -197,13 +558,14 @@ spawn_child_process(const char *image, int *stdout_read, int *stderr_read)
 			exit(1);
 		}
 
-		if (execl(image, NULL) < 0) {
-			fprintf(stderr, "cannot execl %s: %s\n", image, strerror(errno));
+		if (execl(cmd, NULL) < 0) {
+			fprintf(stderr, "cannot execl %s: %s\n", cmd, strerror(errno));
 			exit(1);
 		}
 	}
 
 	return pid;
+#endif
 }
 
 static void
@@ -214,11 +576,22 @@ multiplex_io(fd_set *set)
 	while (1) {
 		fd_set rout;
 
+#ifdef FD_COPY
 		FD_COPY(set, &rout);
+#else
+		rout = *set;
+fprintf(stderr, "fd_set.count: %d\n", set->fd_count);
+for (unsigned i = 0; i < set->fd_count; ++i) {
+fprintf(stderr, "fd_set.array[%u]: %I64d\n", i, set->fd_array[i]);
+}
+#endif
+		fprintf(stderr, "select ...\n");
 		if (select(max_descriptor + 1, &rout, NULL, NULL, NULL) < 0) {
+		fprintf(stderr, "select error :(\n");
 			continue;
 		}
 
+		fprintf(stderr, "%u descriptors ready\n", num_descriptors);
 		for (unsigned int i = 0; i < num_descriptors; ++i) {
 			int fd = descriptors[i].fd;
 			if (!FD_ISSET(fd, &rout)) {
@@ -259,10 +632,14 @@ process_output(struct descriptor_info *info, fd_set *set)
 	strncat(info->buffer + offset, buffer, bytes_read);
 	info->buffer[offset + bytes_read] = '\0';
 
-	while ((linefeed = index(info->buffer, '\n'))) {
+	while ((linefeed = strchr(info->buffer, '\n'))) {
 		*linefeed = '\0';
 		printf(
+#if IS_POSIX
 			"[child %u][%s]: %s\n", info->pid, info->prefix, info->buffer
+#else
+			"[child %lu][%s]: %s\n", info->pid, info->prefix, info->buffer
+#endif
 		);
 		memmove(
 			info->buffer, linefeed + 1, info->buffer_size - strlen(info->buffer)
@@ -294,6 +671,7 @@ xrealloc(void *ptr, size_t bytes)
 	return buffer;
 }
 
+#if IS_POSIX
 static void
 reap_children()
 {
@@ -308,6 +686,7 @@ reap_children()
 		if (!info->pid) {
 			continue;
 		}
+
 		kill(info->pid, SIGKILL);
 	}
 
@@ -354,3 +733,4 @@ static void sigint_handler(int sig)
 	terminating = 1;
 	exit(1);
 }
+#endif

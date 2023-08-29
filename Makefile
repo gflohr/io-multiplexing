@@ -1,13 +1,22 @@
-CC = cc
+ifeq ($(OS),Windows_NT)
+	CC = gcc
+	LIBS = -lws2_32
+else
+	CC = cc
+	LIBS =
+endif
+
 CFLAGS = -Wall
-COMPILE = $(CC) $(CFLAGS)
 
 DEFAULT = all
 
 all: parent.exe child.exe
 
 parent.exe: parent.c
-	$(COMPILE) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
 
 child.exe: child.c
-	$(COMPILE) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
+
+selectable-socketpair.exe: selectable-socketpair.c
+	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
