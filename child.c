@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <winsock.h>
 
 int
 main(int argc, char *argv[])
@@ -27,7 +28,6 @@ main(int argc, char *argv[])
 #endif
 			pid, us);
 		usleep(us);
-fflush(stdout);
 		us = (int) (((float) rand() / RAND_MAX) * 3000000);
 		fprintf(stderr,
 #if IS_UNIX
@@ -37,7 +37,6 @@ fflush(stdout);
 #endif
 			pid, us);
 		usleep(us);
-fflush(stderr);
 	}
 
 	return 0;

@@ -17,6 +17,3 @@ parent.exe: parent.c
 
 child.exe: child.c
 	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
-
-selectable-socketpair.exe: selectable-socketpair.c
-	$(CC) $(CFLAGS) -o $@ $< $(LIBS)

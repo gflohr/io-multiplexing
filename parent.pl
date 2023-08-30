@@ -3,11 +3,19 @@
 use strict;
 
 use Fcntl;
+use Socket; # For MS-DOS only.
+
+use constant FIONBIO => 0x8004667e;
 
 sub spawn_child_process;
+sub spawn_child_process_msdos;
+sub pipe_watcher;
 sub debug;
 
 use constant DEBUG => $ENV{DEBUG_IO_MULTIPLEXING};
+
+# MS-DOS ioctl for making a socket unbuffered.
+use constant FIONBIO => 0x8004667e;
 
 print "Running forever, hit CTRL-C to stop.\n";
 
@@ -36,14 +44,22 @@ foreach (1 .. 3) {
 	# or alternatively just read one byte at a time.  The latter approach
 	# is straightforward. So we go for the first one and set both descriptors
 	# to non blocking I/O mode at system level.
-	my $stdout_flags = fcntl $child_stdout, F_GETFL, 0
-		or die "cannot get descriptor status flags of $child_stdout_fd: $!";
-	fcntl $child_stdout, F_GETFL, $stdout_flags | O_NONBLOCK
-		or die "cannot set descriptor $child_stdout_fd to non-blocking: $!";
-	my $stderr_flags = fcntl $child_stderr, F_GETFL, 0
-		or die "cannot get descriptor status flags of $child_stderr_fd: $!";
-	fcntl $child_stderr, F_GETFL, $stderr_flags | O_NONBLOCK
-		or die "cannot set descriptor $child_stderr_fd to non-blocking: $!";
+	if ('MSWin32' eq $^O) {
+		my $true = 1;
+		ioctl $child_stdout, FIONBIO, \$true
+			or die "cannot set child stdout to non-blocking: $!";
+		ioctl $child_stderr, FIONBIO, \$true
+			or die "cannot set child stderr to non-blocking: $!";
+	} else {
+		my $stdout_flags = fcntl $child_stdout, F_GETFL, 0
+			or die "cannot get descriptor status flags of child stdout: $!\n";
+		fcntl $child_stdout, F_GETFL, $stdout_flags | O_NONBLOCK
+			or die "cannot set child stdout to non-blocking: $!\n";
+		my $stderr_flags = fcntl $child_stderr, F_GETFL, 0
+			or die "cannot get descriptor status flags of child stderr: $!\n";
+		fcntl $child_stderr, F_GETFL, $stderr_flags | O_NONBLOCK
+			or die "cannot set child stderr to non-blocking: $!\n";
+	}
 
 	$descriptors{$child_stdout_fd} = {
 		pid => $pid,
@@ -68,6 +84,7 @@ while (1) {
 	# Now wait until any of these handles are ready to read s.  In C this would
 	# be: select(&rout, NULL, NULL, NULL);
 	select my $rout = $set, undef, undef, undef or next;
+	debug "At least one child has output";
 
 	foreach my $descriptor (keys %descriptors) {
 		# Descriptor is a numerical file descriptor. Check whether the
@@ -95,8 +112,13 @@ while (1) {
 	}
 }
 
+# FIXME! Make this callable with an array!
 sub spawn_child_process {
 	my ($perl, $script) = @_;
+
+	if ('MSWin32' eq $^O) {
+		return spawn_child_process_msdos($perl, $script);
+	}
 
 	pipe my $stdout_read, my $stdout_write or die "cannot create pipe: $!\n";
 	pipe my $stderr_read, my $stderr_write or die "cannot create pipe: $!\n";
@@ -114,6 +136,92 @@ sub spawn_child_process {
 
 		exec $perl, $script or die "cannot exec $perl $script: $!\n";
 	}
+}
+
+sub spawn_child_process_msdos {
+	my ($perl, $script) = @_;
+
+	# These two socketpairs for standard output and standard error
+	# respectively will be polled by means of select.
+	socketpair my $stdout_read, my $stdout_write,
+			AF_UNIX, SOCK_STREAM, PF_UNSPEC
+		or die "cannot create socketpair: $!\n";
+	socketpair my $stderr_read, my $stderr_write,
+			AF_UNIX, SOCK_STREAM, PF_UNSPEC
+		or die "cannot create socketpair: $!\n";
+
+	# Now create two anonymous pipes that are used as standard output and
+	# standard error for the child process.
+	pipe my $cldout_read, my $cldout_write or die "cannot create pipe: $!\n";
+	pipe my $clderr_read, my $clderr_write or die "cannot create pipe: $!\n";
+
+	# Save standard output and standard error.
+	open SAVED_OUT, '>&STDOUT' or die "cannot dup STDOUT: $!\n";
+	open SAVED_ERR, '>&STDERR' or die "cannot dup STDERR: $!\n";
+	
+	# Redirect them to the pipes.
+	open STDOUT, '>&' . $cldout_write->fileno
+		or die "cannot redirect STDOUT to pipe: $!\n";
+	open STDERR, '>&' . $clderr_write->fileno
+		or die "cannot redirect STDERR to pipe: $!\n";
+
+	# At this point, we can no longer write errors to STDERR because it is
+	# the pipe.  We put everything into an eval block, and unconditionally
+	# restore the file handles after it.
+	my $child_pid;
+	eval {
+		require Win32::Process;
+
+		# If you also want to catch warnings and redirect them to the saved
+		# standard error, you have to install a pseudo __WARN__ signal handler
+		# that writes messages to SAVED_ERR.
+		pipe_watcher $stdout_write, $cldout_read, \*SAVED_ERR;
+		pipe_watcher $stderr_write, $clderr_read, \*SAVED_ERR;
+
+		my $process;
+		Win32::Process::Create(
+			$process,
+			$perl, # Absolute path to image or search $PATH.
+			"perl child.pl", # Must be escaped!
+			0, # Inherit handles.
+			0, # Creation flags.
+			'.', # Working directory.
+		) or die "cannot exec: ", Win32::FormatMessage(Win32::GetLastError());
+
+		$child_pid = $process->GetProcessID;
+	};
+	my $x = $@; # Save that.
+
+	# First restore STDERR;
+	if (!open STDERR, '>&SAVED_ERR') {
+		print SAVED_ERR "cannot restore STDERR: $!\n";
+		exit 1;
+	}
+
+	# If there was an exception, re-throw it.  If you want to catch this
+	# exception keep in mind that standard output will be in closed state.
+	die $x if $x;
+
+	# Now clean up the rest.
+	open STDOUT, '>&SAVED_OUT' or die "canot restore STDOUT: $!\n";
+
+	return $child_pid, $stdout_read, $stderr_read;
+}
+
+sub pipe_watcher {
+	my ($socket, $pipe, $stderr) = @_;
+
+	my $thread_id = fork;
+	die "cannot fork: $!\n" if !defined $thread_id;
+
+	return $thread_id if $thread_id; # Parent.
+
+    my $i = 0;
+    while (1) {
+        ++$i;
+		my $line = $pipe->getline;
+		$socket->syswrite($line);
+    }
 }
 
 sub debug {
