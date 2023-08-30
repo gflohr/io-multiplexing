@@ -11,11 +11,22 @@
 # include <ws2tcpip.h>
 # include <windows.h>
 # include <io.h>
+
+typedef struct ChildCommunication {
+	SOCKET socket;
+	int pipe;
+} ChildCommunication;
+
 # define socketpair(domain, type, protocol, sockets) \
 	win32_socketpair(sockets)
 static int win32_socketpair(SOCKET socks[2]);
 static int convert_wsa_error_to_errno(int wsaerr);
+static DWORD create_watcher_thread(SOCKET socket);
+static WINAPI DWORD pipe_watcher(LPVOID args);
+static void display_error(LPCTSTR msg);
+
 #endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -49,8 +60,7 @@ static int terminating = 0;
 #endif
 
 static fd_set spawn_child_processes(const char *image);
-static PID_TYPE spawn_child_process(
-	char *image, int *child_stdout, int *child_stderr);
+static PID_TYPE spawn_child_process(char *image, int *fd);
 static void multiplex_io(fd_set *set);
 static void process_output(struct descriptor_info *info, fd_set *set);
 static char *xstrdup(const char *str);
@@ -297,8 +307,7 @@ main(int argc, char *argv[])
         fprintf(stderr, "could not find a usable version of Winsock.dll\n");
         WSACleanup();
         return 1;
-    }
-        
+    }  
 #endif
 
 	memset(descriptors, 0, sizeof descriptors);
@@ -364,10 +373,13 @@ spawn_child_processes(const char *image)
 		stderr_info->prefix = "error";
 		stderr_info->buffer = xstrdup("");
 		stderr_info->buffer_size = 1;
+		int fd[2];
 
 		stdout_info->pid = stderr_info->pid = spawn_child_process(
-			"./child.exe", &stdout_info->fd, &stderr_info->fd
+			"./child.exe", fd
 		);
+		stdout_info->fd = fd[0];
+		stderr_info->fd = fd[1];
 
 		/* Because of the ideosyncrasies of select() we have to remember the
 		 * highest file descriptor.
@@ -435,7 +447,7 @@ spawn_child_processes(const char *image)
 }
 
 static PID_TYPE
-spawn_child_process(char *cmd, int *stdout_read, int *stderr_read)
+spawn_child_process(char *cmd, int *fd)
 {
 #if IS_MS_DOS
     STARTUPINFO si;
@@ -458,13 +470,21 @@ spawn_child_process(char *cmd, int *stdout_read, int *stderr_read)
 	}
 	child_stderr = stderr_sockets[1];
 
+	/* We wait for child output until we receive a signal.  If you want
+	 * to catch output only for a limited time, you have to remember the
+	 * threads created, and wait for them to terminate.
+	 */
+	(void) create_watcher_thread(child_stdout);
+	(void) create_watcher_thread(child_stderr);
+
     memset(&si, 0, sizeof(si));
 	
     si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
 
-	si.hStdOutput = (HANDLE) child_stdout;
-	si.hStdError = (HANDLE) child_stderr;
+	// Must be set to the pipe later.
+	//si.hStdOutput = (HANDLE) child_stdout;
+	//si.hStdError = (HANDLE) child_stderr;
 
 	SECURITY_ATTRIBUTES secattr; 
 	secattr.nLength = sizeof(SECURITY_ATTRIBUTES); 
@@ -491,12 +511,11 @@ spawn_child_process(char *cmd, int *stdout_read, int *stderr_read)
         goto create_process_failed;
     }
 
-	*stdout_read = stdout_sockets[0];
-	*stderr_read = stderr_sockets[0];
+	fd[0] = stdout_sockets[0];
+	fd[1] = stderr_sockets[0];
 
 	CloseHandle(pi.hProcess);
 	CloseHandle(pi.hThread);
-
 
     return pi.dwProcessId;
 
@@ -568,6 +587,73 @@ create_process_failed:
 #endif
 }
 
+#if IS_MS_DOS
+static DWORD
+create_watcher_thread(SOCKET socket)
+{
+	DWORD thread;
+	ChildCommunication *comm;
+
+	comm = (ChildCommunication *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                sizeof(ChildCommunication));
+	comm->socket = socket;
+
+	if (NULL == CreateThread(
+		NULL, 0, pipe_watcher, comm, 0, &thread
+	)) {
+		display_error(TEXT("cannot create thread: "));
+		ExitProcess(1);
+	}
+
+	return thread;
+}
+
+static DWORD WINAPI
+pipe_watcher (LPVOID args)
+{
+	ChildCommunication *comm = (ChildCommunication *) args;
+
+	const char *msg = "intermediate child output\n";
+	while (1) {
+		if (send(comm->socket, msg, strlen(msg) + 1, 0) < 0) {
+			errno = convert_wsa_error_to_errno(WSAGetLastError());
+			fprintf(stderr, "send failed: %s\n", strerror(errno));
+			return 1;
+		}
+		sleep(1);
+		// ssize_t bytes_read = read(pipe, rbuf, BUFSIZE);
+		// if (bytes_read == 0) {
+
+		// }
+	}
+
+	return 0;
+}
+
+static void
+display_error(LPCTSTR msg)
+{
+	// Retrieve the system error message for the last-error code.
+    LPVOID lpMsgBuf;
+    DWORD dw = GetLastError(); 
+
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+        FORMAT_MESSAGE_FROM_SYSTEM |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        dw,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR) &lpMsgBuf,
+        0, NULL
+	);
+
+	fprintf(stderr, "%s: %s\n", msg, (LPTSTR) &lpMsgBuf);
+
+    LocalFree(lpMsgBuf);
+}
+#endif
+
 static void
 multiplex_io(fd_set *set)
 {
@@ -580,18 +666,13 @@ multiplex_io(fd_set *set)
 		FD_COPY(set, &rout);
 #else
 		rout = *set;
-fprintf(stderr, "fd_set.count: %d\n", set->fd_count);
-for (unsigned i = 0; i < set->fd_count; ++i) {
-fprintf(stderr, "fd_set.array[%u]: %I64d\n", i, set->fd_array[i]);
-}
 #endif
-		fprintf(stderr, "select ...\n");
+
 		if (select(max_descriptor + 1, &rout, NULL, NULL, NULL) < 0) {
 		fprintf(stderr, "select error :(\n");
 			continue;
 		}
 
-		fprintf(stderr, "%u descriptors ready\n", num_descriptors);
 		for (unsigned int i = 0; i < num_descriptors; ++i) {
 			int fd = descriptors[i].fd;
 			if (!FD_ISSET(fd, &rout)) {
@@ -609,12 +690,19 @@ static void
 process_output(struct descriptor_info *info, fd_set *set)
 {
 	char buffer[BUFSIZE];
+#if IS_MS_DOS
+	ssize_t bytes_read = recv(info->fd, buffer, BUFSIZE, 0);
+#else
 	ssize_t bytes_read = read(info->fd, buffer, BUFSIZE);
+#endif
 	size_t offset = strlen(info->buffer);
 	size_t needed = offset + bytes_read + 1;
 	char *linefeed;
 
 	if (bytes_read < 0) {
+#if IS_MS_DOS
+		errno = convert_wsa_error_to_errno(WSAGetLastError());
+#endif
 		fprintf(stderr, "error reading from child: %s\n", strerror(errno));
 		exit(1);
 	} else if (bytes_read == 0) {
