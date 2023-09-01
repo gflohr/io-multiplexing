@@ -1,11 +1,14 @@
 #if !defined(_WIN32) && (defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__)))
 /* POSIX system.  */
-# define IS_POSIX 1
 # include <sys/select.h>
 # include <sys/wait.h>
 #else
 /* MS-DOS */
 # define IS_MS_DOS 1
+
+/* You can change the possible number of file descriptors to select at
+ * compile-time.
+ */
 # define FD_SETSIZE 1024
 # include <winsock2.h>
 # include <ws2tcpip.h>
@@ -25,7 +28,6 @@ static void create_pipe(HANDLE handles[]);
 static DWORD create_watcher_thread(SOCKET socket, HANDLE pipe);
 static WINAPI DWORD pipe_watcher(LPVOID args);
 static void display_error(LPCTSTR msg);
-
 #endif
 
 #include <stdlib.h>
@@ -56,7 +58,7 @@ struct descriptor_info {
 static struct descriptor_info descriptors[CHILDREN << 1];
 static int max_descriptor = -1;
 
-#if IS_POSIX
+#if !IS_MS_DOS
 static int terminating = 0;
 #endif
 
@@ -66,7 +68,7 @@ static void multiplex_io(fd_set *set);
 static void process_output(struct descriptor_info *info, fd_set *set);
 static char *xstrdup(const char *str);
 static void *xrealloc(void *buf, size_t size);
-#if IS_POSIX
+#if !IS_MS_DOS
 static void reap_children(void);
 static void sigchld_handler(int sig);
 static void sigint_handler(int sig);
@@ -77,118 +79,118 @@ static void sigint_handler(int sig);
 static int
 convert_wsa_error_to_errno(int wsaerr)
 {
-    switch (wsaerr) {
-    case WSAEINTR:
-        return EINTR;
-    case WSAEBADF:
-        return EBADF;
-    case WSAEACCES:
-        return EACCES;
-    case WSAEFAULT:
-        return EFAULT;
-    case WSAEINVAL:
-        return EINVAL;
-    case WSAEMFILE:
-        return EMFILE;
-    case WSAEWOULDBLOCK:
-        return EWOULDBLOCK;
-    case WSAEINPROGRESS:
-        return EINPROGRESS;
-    case WSAEALREADY:
-        return EALREADY;
-    case WSAENOTSOCK:
-        return ENOTSOCK;
-    case WSAEDESTADDRREQ:
-        return EDESTADDRREQ;
-    case WSAEMSGSIZE:
-        return EMSGSIZE;
-    case WSAEPROTOTYPE:
-        return EPROTOTYPE;
-    case WSAENOPROTOOPT:
-        return ENOPROTOOPT;
-    case WSAEPROTONOSUPPORT:
-        return EPROTONOSUPPORT;
-    case WSAEOPNOTSUPP:
-        return EOPNOTSUPP;
-    case WSAEAFNOSUPPORT:
-        return EAFNOSUPPORT;
-    case WSAEADDRINUSE:
-        return EADDRINUSE;
-    case WSAEADDRNOTAVAIL:
-        return EADDRNOTAVAIL;
-    case WSAENETDOWN:
-        return ENETDOWN;
-    case WSAENETUNREACH:
-        return ENETUNREACH;
-    case WSAENETRESET:
-        return ENETRESET;
-    case WSAECONNABORTED:
-        return ECONNABORTED;
-    case WSAECONNRESET:
-        return ECONNRESET;
-    case WSAENOBUFS:
-        return ENOBUFS;
-    case WSAEISCONN:
-        return EISCONN;
-    case WSAENOTCONN:
-        return ENOTCONN;
-    case WSAESHUTDOWN:
+	switch (wsaerr) {
+	case WSAEINTR:
+		return EINTR;
+	case WSAEBADF:
+		return EBADF;
+	case WSAEACCES:
+		return EACCES;
+	case WSAEFAULT:
+		return EFAULT;
+	case WSAEINVAL:
+		return EINVAL;
+	case WSAEMFILE:
+		return EMFILE;
+	case WSAEWOULDBLOCK:
+		return EWOULDBLOCK;
+	case WSAEINPROGRESS:
+		return EINPROGRESS;
+	case WSAEALREADY:
+		return EALREADY;
+	case WSAENOTSOCK:
+		return ENOTSOCK;
+	case WSAEDESTADDRREQ:
+		return EDESTADDRREQ;
+	case WSAEMSGSIZE:
+		return EMSGSIZE;
+	case WSAEPROTOTYPE:
+		return EPROTOTYPE;
+	case WSAENOPROTOOPT:
+		return ENOPROTOOPT;
+	case WSAEPROTONOSUPPORT:
+		return EPROTONOSUPPORT;
+	case WSAEOPNOTSUPP:
+		return EOPNOTSUPP;
+	case WSAEAFNOSUPPORT:
+		return EAFNOSUPPORT;
+	case WSAEADDRINUSE:
+		return EADDRINUSE;
+	case WSAEADDRNOTAVAIL:
+		return EADDRNOTAVAIL;
+	case WSAENETDOWN:
+		return ENETDOWN;
+	case WSAENETUNREACH:
+		return ENETUNREACH;
+	case WSAENETRESET:
+		return ENETRESET;
+	case WSAECONNABORTED:
+		return ECONNABORTED;
+	case WSAECONNRESET:
 		return ECONNRESET;
-    case WSAETIMEDOUT:
-        return ETIMEDOUT;
-    case WSAECONNREFUSED:
-        return ECONNREFUSED;
-    case WSAELOOP:
-        return ELOOP;
-    case WSAENAMETOOLONG:
-        return ENAMETOOLONG;
-    case WSAEHOSTDOWN:
-        return ENETDOWN;        /* EHOSTDOWN is not defined */
-    case WSAEHOSTUNREACH:
-        return EHOSTUNREACH;
-    case WSAENOTEMPTY:
-        return ENOTEMPTY;
-    case WSAEPROCLIM:
-        return EAGAIN;
-    case WSAEUSERS:
-        return EAGAIN;
-    case WSAEDQUOT:
-        return EAGAIN;
+	case WSAENOBUFS:
+		return ENOBUFS;
+	case WSAEISCONN:
+		return EISCONN;
+	case WSAENOTCONN:
+		return ENOTCONN;
+	case WSAESHUTDOWN:
+		return ECONNRESET;
+	case WSAETIMEDOUT:
+		return ETIMEDOUT;
+	case WSAECONNREFUSED:
+		return ECONNREFUSED;
+	case WSAELOOP:
+		return ELOOP;
+	case WSAENAMETOOLONG:
+		return ENAMETOOLONG;
+	case WSAEHOSTDOWN:
+		return ENETDOWN;		/* EHOSTDOWN is not defined */
+	case WSAEHOSTUNREACH:
+		return EHOSTUNREACH;
+	case WSAENOTEMPTY:
+		return ENOTEMPTY;
+	case WSAEPROCLIM:
+		return EAGAIN;
+	case WSAEUSERS:
+		return EAGAIN;
+	case WSAEDQUOT:
+		return EAGAIN;
 #ifdef WSAECANCELLED
-    case WSAECANCELLED:         /* New in WinSock2 */
-        return ECANCELED;
+	case WSAECANCELLED:		 /* New in WinSock2 */
+		return ECANCELED;
 #endif
-    }
+	}
 
-    return EINVAL;
+	return EINVAL;
 }
 
 /* This is inspired by the socketpair() emulation of Perl.  */
 static int
 win32_socketpair(SOCKET sockets[2])
 {
-    SOCKET listener = SOCKET_ERROR;
+	SOCKET listener = SOCKET_ERROR;
 	struct sockaddr_in listener_addr;
 	SOCKET connector = SOCKET_ERROR;
 	struct sockaddr_in connector_addr;
 	SOCKET acceptor = SOCKET_ERROR;
-    int saved_errno;
-    socklen_t addr_size;
+	int saved_errno;
+	socklen_t addr_size;
 
-    if (!sockets) {
+	if (!sockets) {
 		errno = EINVAL;
 		return SOCKET_ERROR;
-    }
-
-    listener = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
-    if (listener < 0) {
-        return SOCKET_ERROR;
 	}
 
-    memset(&listener_addr, 0, sizeof listener_addr);
+	listener = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+	if (listener < 0) {
+		return SOCKET_ERROR;
+	}
+
+	memset(&listener_addr, 0, sizeof listener_addr);
 	listener_addr.sin_family = AF_INET;
-    listener_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    listener_addr.sin_port = 0;  /* OS picks a random free port.  */
+	listener_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	listener_addr.sin_port = 0;  /* OS picks a random free port.  */
 
 	errno = 0;
 	if (bind(listener, (struct sockaddr *) &listener_addr,
@@ -212,7 +214,7 @@ win32_socketpair(SOCKET sockets[2])
 	/* Get the port number.  */
 	addr_size = sizeof connector_addr;
 	if (getsockname(listener, (struct sockaddr *) &connector_addr,
-	                &addr_size) < 0) {
+					&addr_size) < 0) {
 		goto fail_win32_socketpair;
 	}
 	if (addr_size != sizeof connector_addr) {
@@ -220,7 +222,7 @@ win32_socketpair(SOCKET sockets[2])
 	}
 
 	if (connect(connector, (struct sockaddr *) &connector_addr,
-	            addr_size) < 0) {
+				addr_size) < 0) {
 		goto fail_win32_socketpair;
 	}
 
@@ -232,11 +234,11 @@ win32_socketpair(SOCKET sockets[2])
 		goto abort_win32_socketpair;
 	}
 
-    closesocket(listener);
+	closesocket(listener);
 
 	/* The port and host on the socket must be identical.  */
 	if (getsockname(connector, (struct sockaddr *) &connector_addr,
-	                &addr_size) < 0) {
+					&addr_size) < 0) {
 		goto fail_win32_socketpair;
 	}
 	
@@ -257,7 +259,7 @@ abort_win32_socketpair:
 #elif defined(ECONNREFUSED)
   errno = ECONNREFUSED; /* some OSes might not have ECONNABORTED. */
 #else
-  errno = ETIMEDOUT;    /* Desperation time. */
+  errno = ETIMEDOUT;	/* Desperation time. */
 #endif
 
 fail_win32_socketpair:
@@ -267,17 +269,17 @@ fail_win32_socketpair:
 
 	saved_errno = errno;
 	if (listener >= 0) {
-    	closesocket(listener);
+		closesocket(listener);
 	}
 	if (connector >= 0) {
-    	closesocket(connector);
+		closesocket(connector);
 	}
 	if (acceptor >= 0) {
-    	closesocket(acceptor);
+		closesocket(acceptor);
 	}
 	errno = saved_errno;
 
-    return SOCKET_ERROR;
+	return SOCKET_ERROR;
 }
 #endif
 
@@ -291,29 +293,29 @@ main(int argc, char *argv[])
 	 * calls to WSAStartup()/WSACleanup() to win32_socketpair() as they
 	 * can apparently be nested.
 	 */
-    WORD versionRequested;
-    WSADATA wsaData;
-    int err;
+	WORD versionRequested;
+	WSADATA wsaData;
+	int err;
 
-    versionRequested = MAKEWORD(2, 2);
+	versionRequested = MAKEWORD(2, 2);
 
-    err = WSAStartup(versionRequested, &wsaData);
-    if (err != 0) {
-        fprintf(stderr, "WSAStartup failed with error code: %d\n", err);
-        return 1;
-    }
+	err = WSAStartup(versionRequested, &wsaData);
+	if (err != 0) {
+		fprintf(stderr, "WSAStartup failed with error code: %d\n", err);
+		return 1;
+	}
 
-	/* Request version 2.2.  */
-    if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) {
-        fprintf(stderr, "could not find a usable version of Winsock.dll\n");
-        WSACleanup();
-        return 1;
-    }  
+	/* Request version 2.2 of Trumpet Winsock.  */
+	if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) {
+		fprintf(stderr, "could not find a usable version of Winsock.dll\n");
+		WSACleanup();
+		return 1;
+	}  
 #endif
 
 	memset(descriptors, 0, sizeof descriptors);
 
-#if IS_POSIX
+#if !IS_MS_DOS
 	struct sigaction sa;
 	sa.sa_handler = &sigchld_handler;
 	sigemptyset(&sa.sa_mask);
@@ -356,6 +358,7 @@ main(int argc, char *argv[])
 #else
 	fd_set set = spawn_child_processes("./child.exe");
 #endif
+
 	multiplex_io(&set);
 
 	return 0;
@@ -454,23 +457,22 @@ static PID_TYPE
 spawn_child_process(char *cmd, int *fd)
 {
 #if IS_MS_DOS
-    STARTUPINFO si;
-    PROCESS_INFORMATION pi;
+	STARTUPINFO si;
+	PROCESS_INFORMATION pi;
 	SOCKET stdout_sockets[2] = { SOCKET_ERROR, SOCKET_ERROR };
 	SOCKET stderr_sockets[2] = { SOCKET_ERROR, SOCKET_ERROR };
 	SOCKET selectable_stdout;
 	SOCKET selectable_stderr;
-	BOOL created;
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, stdout_sockets) < 0) {
-        fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
-        goto create_process_failed;
+		fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
+		goto create_process_failed;
 	}
 	selectable_stdout = stdout_sockets[1];
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, stderr_sockets) < 0) {
-       	fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
-        goto create_process_failed;
+	   	fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
+		goto create_process_failed;
 	}
 	selectable_stderr = stderr_sockets[1];
 
@@ -478,7 +480,7 @@ spawn_child_process(char *cmd, int *fd)
 	HANDLE child_stdout[2];
 	create_pipe(child_stdout);
 
-    HANDLE child_stderr[2];
+	HANDLE child_stderr[2];
 	create_pipe(child_stderr);
 	
 	/* We wait for child output until we receive a signal.  If you want
@@ -488,30 +490,24 @@ spawn_child_process(char *cmd, int *fd)
 	(void) create_watcher_thread(selectable_stdout, child_stdout[0]);
 	(void) create_watcher_thread(selectable_stderr, child_stderr[0]);
 
-    memset(&si, 0, sizeof(si));	
-    si.cb = sizeof(si);
+	memset(&si, 0, sizeof(si));	
+	si.cb = sizeof(si);
 	si.hStdOutput = child_stdout[1];
 	si.hStdError = child_stderr[1];
 	si.dwFlags = STARTF_USESTDHANDLES;
 
-    memset(&pi, 0, sizeof(pi));
+	memset(&pi, 0, sizeof(pi));
 
-	created = CreateProcess(NULL,
-        cmd,            // Command.
-        NULL,           // Process handle not inheritable
-        NULL,           // Thread handle not inheritable
-        TRUE,           // Set handle inheritance to FALSE
-        0,              // No creation flags
-        NULL,           // Use parent's environment block
-        NULL,           // Use parent's starting directory 
-        &si,            // Pointer to STARTUPINFO structure
-        &pi             // Pointer to PROCESS_INFORMATION structure
-    );
-
-	if (!created) {
-        printf("CreateProcess failed: %s.\n", strerror(errno));
-        goto create_process_failed;
-    }
+	/* The first and second argument in combination determine the path to
+	 * the image and the arguments to invoke it with but their semantics are
+	 * weird.  The best strategy seems to be to pass a NULL pointer for the
+	 * first argument and escape all command-line arguments with Pascal
+	 * escaping (replace all double quotes with two double quotes).
+	 */
+	if (!CreateProcess(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+		printf("CreateProcess failed: %s.\n", strerror(errno));
+		goto create_process_failed;
+	}
 
 	fd[0] = stdout_sockets[0];
 	fd[1] = stderr_sockets[0];
@@ -519,10 +515,7 @@ spawn_child_process(char *cmd, int *fd)
 	CloseHandle(pi.hProcess);
 	CloseHandle(pi.hThread);
 
-	//close(child_stdout[1]);
-	//close(child_stderr[1]);
-
-    return pi.dwProcessId;
+	return pi.dwProcessId;
 
 create_process_failed:
 	if (stdout_sockets[0] >= 0) {
@@ -565,8 +558,8 @@ create_process_failed:
 
 	pid_t pid = fork();
 	if (pid > 0) {
-		*stdout_read = stdout_fd[0];
-		*stderr_read = stderr_fd[0];
+		fd[0] = stdout_fd[0];
+		fd[1] = stderr_fd[0];
 
 		return pid;
 	} else if (pid < 0) {
@@ -602,26 +595,17 @@ create_pipe(HANDLE handles[2])
 	sa.bInheritHandle = TRUE;
 	sa.lpSecurityDescriptor = NULL;
 
-	/* Microsoft says that _pipe() is not available for applications that
-	 * execute in the "Windows Runtime" whatever that is, see
-	 * https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/pipe
-	 * 
-	 * If you run into issues with _pipe(), use the method CreatePipe()
-	 * instead which creates the obscure HANDLE objects.  Keep in mind that
-	 * you then cannot inquire errno for errors but have to use the wonky
-	 * MS-DOS error reporting with GetLastError().
-	 */
-    if (!CreatePipe(&handles[0], &handles[1], &sa, 0)) {
+	if (!CreatePipe(&handles[0], &handles[1], &sa, 0)) {
 		display_error(TEXT("cannot create pipe"));
-    	exit(1);
-    }
+		exit(1);
+	}
 
    /* Necessary according to Microsoft documentation, see
-    * https://learn.microsoft.com/en-us/windows/win32/procthread/creating-a-child-process-with-redirected-input-and-output
+	* https://learn.microsoft.com/en-us/windows/win32/procthread/creating-a-child-process-with-redirected-input-and-output
 	* I could not see any effect, though.
 	*/ 
    	if (!SetHandleInformation(handles[0], HANDLE_FLAG_INHERIT, 0)) {
-      	display_error(TEXT("cannot unset inherited flag on child stdout"));
+	  	display_error(TEXT("cannot unset inherited flag on child stdout"));
 		exit(1);
 	}
 }
@@ -680,23 +664,23 @@ static void
 display_error(LPCTSTR msg)
 {
 	// Retrieve the system error message for the last-error code.
-    LPVOID lpMsgBuf;
-    DWORD dw = GetLastError(); 
+	LPVOID lpMsgBuf;
+	DWORD dw = GetLastError(); 
 
-    FormatMessage(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-        FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS,
-        NULL,
-        dw,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR) &lpMsgBuf,
-        0, NULL
+	FormatMessage(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+		FORMAT_MESSAGE_FROM_SYSTEM |
+		FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL,
+		dw,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR) &lpMsgBuf,
+		0, NULL
 	);
 
 	fprintf(stderr, "%s: %s\n", msg, (LPTSTR) &lpMsgBuf);
 
-    LocalFree(lpMsgBuf);
+	LocalFree(lpMsgBuf);
 }
 #endif
 
@@ -769,7 +753,7 @@ process_output(struct descriptor_info *info, fd_set *set)
 	while ((linefeed = strchr(info->buffer, '\n'))) {
 		*linefeed = '\0';
 		printf(
-#if IS_POSIX
+#if !IS_MS_DOS
 			"[child %u][%s]: %s\n", info->pid, info->prefix, info->buffer
 #else
 			"[child %lu][%s]: %s\n", info->pid, info->prefix, info->buffer
@@ -805,7 +789,7 @@ xrealloc(void *ptr, size_t bytes)
 	return buffer;
 }
 
-#if IS_POSIX
+#if !IS_MS_DOS
 static void
 reap_children()
 {
