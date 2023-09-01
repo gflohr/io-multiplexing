@@ -12,16 +12,17 @@
 # include <windows.h>
 # include <io.h>
 
-typedef struct ChildCommunication {
+typedef struct ChildConnector {
 	SOCKET socket;
-	int pipe;
-} ChildCommunication;
+	HANDLE pipe;
+} ChildConnector;
 
 # define socketpair(domain, type, protocol, sockets) \
 	win32_socketpair(sockets)
 static int win32_socketpair(SOCKET socks[2]);
 static int convert_wsa_error_to_errno(int wsaerr);
-static DWORD create_watcher_thread(SOCKET socket);
+static void create_pipe(HANDLE handles[]);
+static DWORD create_watcher_thread(SOCKET socket, HANDLE pipe);
 static WINAPI DWORD pipe_watcher(LPVOID args);
 static void display_error(LPCTSTR msg);
 
@@ -350,8 +351,11 @@ main(int argc, char *argv[])
 	atexit(reap_children);
 #endif
 
+#if IS_MSDOS
+	fd_set set = spawn_child_processes(".\\child.exe");
+#else
 	fd_set set = spawn_child_processes("./child.exe");
-
+#endif
 	multiplex_io(&set);
 
 	return 0;
@@ -454,47 +458,48 @@ spawn_child_process(char *cmd, int *fd)
     PROCESS_INFORMATION pi;
 	SOCKET stdout_sockets[2] = { SOCKET_ERROR, SOCKET_ERROR };
 	SOCKET stderr_sockets[2] = { SOCKET_ERROR, SOCKET_ERROR };
-	SOCKET child_stdout;
-	SOCKET child_stderr;
+	SOCKET selectable_stdout;
+	SOCKET selectable_stderr;
 	BOOL created;
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, stdout_sockets) < 0) {
         fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
         goto create_process_failed;
 	}
-	child_stdout = stdout_sockets[1];
+	selectable_stdout = stdout_sockets[1];
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, stderr_sockets) < 0) {
        	fprintf(stderr, "cannot create socketpair: %s\n", strerror(errno));
         goto create_process_failed;
 	}
-	child_stderr = stderr_sockets[1];
+	selectable_stderr = stderr_sockets[1];
 
+	/* Create two pipes for stdout and stderr.  */
+	HANDLE child_stdout[2];
+	create_pipe(child_stdout);
+
+    HANDLE child_stderr[2];
+	create_pipe(child_stderr);
+	
 	/* We wait for child output until we receive a signal.  If you want
 	 * to catch output only for a limited time, you have to remember the
 	 * threads created, and wait for them to terminate.
 	 */
-	(void) create_watcher_thread(child_stdout);
-	(void) create_watcher_thread(child_stderr);
+	(void) create_watcher_thread(selectable_stdout, child_stdout[0]);
+	(void) create_watcher_thread(selectable_stderr, child_stderr[0]);
 
-    memset(&si, 0, sizeof(si));
-	
+    memset(&si, 0, sizeof(si));	
     si.cb = sizeof(si);
+	si.hStdOutput = child_stdout[1];
+	si.hStdError = child_stderr[1];
+	si.dwFlags = STARTF_USESTDHANDLES;
+
     memset(&pi, 0, sizeof(pi));
-
-	// Must be set to the pipe later.
-	//si.hStdOutput = (HANDLE) child_stdout;
-	//si.hStdError = (HANDLE) child_stderr;
-
-	SECURITY_ATTRIBUTES secattr; 
-	secattr.nLength = sizeof(SECURITY_ATTRIBUTES); 
-	secattr.bInheritHandle = TRUE;
-	secattr.lpSecurityDescriptor = NULL; 
 
 	created = CreateProcess(NULL,
         cmd,            // Command.
-        &secattr,           // Process handle not inheritable
-        &secattr,           // Thread handle not inheritable
+        NULL,           // Process handle not inheritable
+        NULL,           // Thread handle not inheritable
         TRUE,           // Set handle inheritance to FALSE
         0,              // No creation flags
         NULL,           // Use parent's environment block
@@ -502,9 +507,6 @@ spawn_child_process(char *cmd, int *fd)
         &si,            // Pointer to STARTUPINFO structure
         &pi             // Pointer to PROCESS_INFORMATION structure
     );
-
-	close(child_stdout);
-	close(child_stderr);
 
 	if (!created) {
         printf("CreateProcess failed: %s.\n", strerror(errno));
@@ -516,6 +518,9 @@ spawn_child_process(char *cmd, int *fd)
 
 	CloseHandle(pi.hProcess);
 	CloseHandle(pi.hThread);
+
+	//close(child_stdout[1]);
+	//close(child_stderr[1]);
 
     return pi.dwProcessId;
 
@@ -588,19 +593,51 @@ create_process_failed:
 }
 
 #if IS_MS_DOS
+static void
+create_pipe(HANDLE handles[2])
+{
+	SECURITY_ATTRIBUTES sa;
+
+	sa.nLength = sizeof sa;
+	sa.bInheritHandle = TRUE;
+	sa.lpSecurityDescriptor = NULL;
+
+	/* Microsoft says that _pipe() is not available for applications that
+	 * execute in the "Windows Runtime" whatever that is, see
+	 * https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/pipe
+	 * 
+	 * If you run into issues with _pipe(), use the method CreatePipe()
+	 * instead which creates the obscure HANDLE objects.  Keep in mind that
+	 * you then cannot inquire errno for errors but have to use the wonky
+	 * MS-DOS error reporting with GetLastError().
+	 */
+    if (!CreatePipe(&handles[0], &handles[1], &sa, 0)) {
+		display_error(TEXT("cannot create pipe"));
+    	exit(1);
+    }
+
+   /* Necessary according to Microsoft documentation, see
+    * https://learn.microsoft.com/en-us/windows/win32/procthread/creating-a-child-process-with-redirected-input-and-output
+	* I could not see any effect, though.
+	*/ 
+   	if (!SetHandleInformation(handles[0], HANDLE_FLAG_INHERIT, 0)) {
+      	display_error(TEXT("cannot unset inherited flag on child stdout"));
+		exit(1);
+	}
+}
+
 static DWORD
-create_watcher_thread(SOCKET socket)
+create_watcher_thread(SOCKET socket, HANDLE pipe)
 {
 	DWORD thread;
-	ChildCommunication *comm;
+	ChildConnector *conn;
 
-	comm = (ChildCommunication *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                sizeof(ChildCommunication));
-	comm->socket = socket;
+	conn = (ChildConnector *) HeapAlloc(GetProcessHeap(),
+		HEAP_ZERO_MEMORY, sizeof(ChildConnector));
+	conn->socket = socket;
+	conn->pipe = pipe;
 
-	if (NULL == CreateThread(
-		NULL, 0, pipe_watcher, comm, 0, &thread
-	)) {
+	if (NULL == CreateThread(NULL, 0, pipe_watcher, conn, 0, &thread)) {
 		display_error(TEXT("cannot create thread: "));
 		ExitProcess(1);
 	}
@@ -611,20 +648,29 @@ create_watcher_thread(SOCKET socket)
 static DWORD WINAPI
 pipe_watcher (LPVOID args)
 {
-	ChildCommunication *comm = (ChildCommunication *) args;
+	ChildConnector *comm = (ChildConnector *) args;
+	char rbuf[BUFSIZE];
 
-	const char *msg = "intermediate child output\n";
 	while (1) {
-		if (send(comm->socket, msg, strlen(msg) + 1, 0) < 0) {
-			errno = convert_wsa_error_to_errno(WSAGetLastError());
-			fprintf(stderr, "send failed: %s\n", strerror(errno));
+		DWORD bytes_read;
+   		BOOL status = ReadFile(comm->pipe, rbuf, BUFSIZE, &bytes_read, NULL);
+		if (!status) {
+			/* Microsoft states in its nebulous documenation for _read() that
+			 * errno is set to EBADF "if execution is allowed to continue".
+			 * Does that mean that the error should be ignored? No idea. :(
+			 */
+			display_error(TEXT("read from pipe failed"));
 			return 1;
+		} else if (bytes_read == 0) {
+			fprintf(stderr, "end of file reading from child process");
+			return 1;
+		} else {
+			if (send(comm->socket, rbuf, bytes_read, 0) < 0) {
+				errno = convert_wsa_error_to_errno(WSAGetLastError());
+				fprintf(stderr, "send failed: %s\n", strerror(errno));
+				return 1;
+			}
 		}
-		sleep(1);
-		// ssize_t bytes_read = read(pipe, rbuf, BUFSIZE);
-		// if (bytes_read == 0) {
-
-		// }
 	}
 
 	return 0;

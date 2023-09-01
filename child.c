@@ -2,16 +2,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
-#include <winsock.h>
 
 int
 main(int argc, char *argv[])
 {
 	pid_t pid = getpid();
 
-	/* Make standard output and standard error unbuffered.  */
-	setvbuf(stdout, NULL, _IOLBF, 0);
-	setvbuf(stderr, NULL, _IOLBF, 0);
+	/* Make standard output and standard error unbuffered.  Normally, you
+	 * make them line buffered but that doesn't work on MS-DOS.
+	 */
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
 
 	/* Try to force a different random seed for every child.  */
 	srand(time(NULL) + pid);
@@ -28,6 +29,7 @@ main(int argc, char *argv[])
 #endif
 			pid, us);
 		usleep(us);
+
 		us = (int) (((float) rand() / RAND_MAX) * 3000000);
 		fprintf(stderr,
 #if IS_UNIX
