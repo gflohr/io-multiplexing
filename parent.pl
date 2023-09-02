@@ -9,7 +9,6 @@ use constant FIONBIO => 0x8004667e;
 
 sub spawn_child_process;
 sub spawn_child_process_msdos;
-sub pipe_watcher;
 sub debug;
 
 use constant DEBUG => $ENV{DEBUG_IO_MULTIPLEXING};
@@ -150,19 +149,14 @@ sub spawn_child_process_msdos {
 			AF_UNIX, SOCK_STREAM, PF_UNSPEC
 		or die "cannot create socketpair: $!\n";
 
-	# Now create two anonymous pipes that are used as standard output and
-	# standard error for the child process.
-	pipe my $cldout_read, my $cldout_write or die "cannot create pipe: $!\n";
-	pipe my $clderr_read, my $clderr_write or die "cannot create pipe: $!\n";
-
 	# Save standard output and standard error.
 	open SAVED_OUT, '>&STDOUT' or die "cannot dup STDOUT: $!\n";
 	open SAVED_ERR, '>&STDERR' or die "cannot dup STDERR: $!\n";
 	
-	# Redirect them to the pipes.
-	open STDOUT, '>&' . $cldout_write->fileno
+	# Redirect them to the write end of the socket pairs.
+	open STDOUT, '>&' . $stdout_write->fileno
 		or die "cannot redirect STDOUT to pipe: $!\n";
-	open STDERR, '>&' . $clderr_write->fileno
+	open STDERR, '>&' . $stderr_write->fileno
 		or die "cannot redirect STDERR to pipe: $!\n";
 
 	# At this point, we can no longer write errors to STDERR because it is
@@ -171,12 +165,6 @@ sub spawn_child_process_msdos {
 	my $child_pid;
 	eval {
 		require Win32::Process;
-
-		# If you also want to catch warnings and redirect them to the saved
-		# standard error, you have to install a pseudo __WARN__ signal handler
-		# that writes messages to SAVED_ERR.
-		pipe_watcher $stdout_write, $cldout_read, \*SAVED_ERR;
-		pipe_watcher $stderr_write, $clderr_read, \*SAVED_ERR;
 
 		my $process;
 		Win32::Process::Create(
@@ -206,22 +194,6 @@ sub spawn_child_process_msdos {
 	open STDOUT, '>&SAVED_OUT' or die "canot restore STDOUT: $!\n";
 
 	return $child_pid, $stdout_read, $stderr_read;
-}
-
-sub pipe_watcher {
-	my ($socket, $pipe, $stderr) = @_;
-
-	my $thread_id = fork;
-	die "cannot fork: $!\n" if !defined $thread_id;
-
-	return $thread_id if $thread_id; # Parent.
-
-    my $i = 0;
-    while (1) {
-        ++$i;
-		my $line = $pipe->getline;
-		$socket->syswrite($line);
-    }
 }
 
 sub debug {
