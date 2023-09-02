@@ -178,6 +178,10 @@ win32_socketpair(SOCKET sockets[2])
 		return SOCKET_ERROR;
 	}
 
+	/* This must be WSASocket() and not socket().  The subtle difference is
+	 * that only sockets created by WSASocket() can be used as standard
+	 * file descriptors.
+	 */
 	listener = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
 	if (listener < 0) {
 		return SOCKET_ERROR;
@@ -198,11 +202,7 @@ win32_socketpair(SOCKET sockets[2])
 		goto fail_win32_socketpair;
 	}
 
-	/* This must be WSASocket() and not socket().  The subtle difference is
-	 * that only sockets created by WSASocket() can be used as standard
-	 * file descriptors.
-	 */
-	connector = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+	connector = socket(AF_INET, SOCK_STREAM, 0);
 	if (connector == -1) {
 		goto fail_win32_socketpair;
 	}
@@ -247,6 +247,7 @@ win32_socketpair(SOCKET sockets[2])
 
 	sockets[0] = connector;
 	sockets[1] = acceptor;
+
 	return 0;
 
 abort_win32_socketpair:
