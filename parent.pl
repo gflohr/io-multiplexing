@@ -5,8 +5,6 @@ use strict;
 use Fcntl;
 use Socket; # For MS-DOS only.
 
-use constant FIONBIO => 0x8004667e;
-
 sub spawn_child_process;
 sub spawn_child_process_msdos;
 sub pipe_watcher;
@@ -203,7 +201,7 @@ sub spawn_child_process_msdos {
 	die $x if $x;
 
 	# Now clean up the rest.
-	open STDOUT, '>&SAVED_OUT' or die "canot restore STDOUT: $!\n";
+	open STDOUT, '>&SAVED_OUT' or die "cannot restore STDOUT: $!\n";
 
 	return $child_pid, $stdout_read, $stderr_read;
 }
