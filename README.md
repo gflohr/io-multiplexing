@@ -1,11 +1,11 @@
-# io-multiplexing
+# platform-independent-ipc
 
-Example for platform-independent IO-multiplexing
+Example for platform-independent, asynchronous IPC with child processes.
 
 ## Additional Information
 
 This repository illustrates the information of the blog post at
-http://www.guido-flohr.net/platform-independent-child-process-i-o-multiplexing.
+http://www.guido-flohr.net/platform-independent-asynchronous-child-process-ipc.
 
 Source code is provided for Perl and C.
 
